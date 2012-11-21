@@ -1,0 +1,193 @@
+=== Prepare git-friendly rpmbuild environment ===
+
+cat >> ~/.rpmmacros <<'END'
+# From http://stackoverflow.com/questions/7535551/how-can-i-use-git-to-track-srpm-customizations
+#%_topdir    %(echo ${RPM_TOPDIR:-$HOME/redhat})
+%_specdir   %{_topdir}/PACKAGES/%{name}/%{version}
+%_sourcedir %{_topdir}/PACKAGES/%{name}/%{version}/sources
+%_rpmdir    %{_topdir}/PACKAGES/%{name}/%{version}/rpms
+END
+
+rpmdev-setuptree
+
+===  Recover broken RPM ===
+
+* download http://download1.rpmfusion.org/free/fedora/updates/17/SRPMS/staging-kmod-addons-3.6.1-1.fc17.src.rpm 
+
+T=`mktemp -d`
+cd $T
+rpm2cpio ~/Downloads/staging-kmod-addons-3.6.1-1.fc17.src.rpm | cpio -ivd
+mkdir -p ~/rpmbuild/PACKAGES/staging-kmod-addons/3.4.18/sources ~/rpmbuild/PACKAGES/staging-kmod-addons/3.4.18/rpms
+mv *.spec ~/rpmbuild/PACKAGES/staging-kmod-addons/3.4.18/
+mv * ~/rpmbuild/PACKAGES/staging-kmod-addons/3.4.18/sources
+cd
+rm -rf $T
+
+=== Put RPM sources under git ===
+
+git init
+git add .
+git commit -m 'Initial import'
+* edit .spec, downgrade kernel version, etc
+* edit create-linux-staging-tarball.sh to use qubes sources
+
+cd /home/user/qubes/qubes-builder/qubes-src/kernel/kernel-3.4.18/linux-3.4.18
+/home/user/rpmbuild/PACKAGES/staging-kmod-addons/3.4.18/sources/create-linux-staging-tarball.sh 3.4.18
+
+git rm sources/linux-staging-3.6.1.tar.bz2 
+git add sources/linux-staging-3.4.18.tar.bz2 
+git add staging-kmod-addons.spec sources/create-linux-staging-tarball.sh 
+git commit -m 'adapted for Qubes'
+
+=== Build it finally ===
+rpmbuild -ba staging-kmod-addons.spec
+
+ls -l /home/user/rpmbuild/PACKAGES/staging-kmod-addons/3.4.18/rpms/x86_64
+total 136
+-rw-rw-r-- 1 user user 22245 Nov 21 22:59 staging-kmod-addons-3.4.18-1.fc17.x86_64.rpm
+-rw-rw-r-- 1 user user 95073 Nov 21 22:59 usbip-3.4.18-1.fc17.x86_64.rpm
+-rw-rw-r-- 1 user user 14585 Nov 21 22:59 usbip-devel-3.4.18-1.fc17.x86_64.rpm
+
+=== Deploy ===
+
+Here netvm plays a rolw of usbvm, and work acts as a client In both:
+sudo rpm -vi usbip-3.4.18-1.fc17.x86_64.rpm staging-kmod-addons-3.4.18-1.fc17.x86_64.rpm
+
+==== netvm ====
+
+Very dirty iptables hack:
+sudo iptables -I INPUT 1 -p tcp -s 10.137.1.5 -d 10.137.1.1 --dport 3240 -j ACCEPT
+
+sudo modprobe usbip-core
+sudo modprobe usbip-host
+
+sudo usbipd -d
+
+==== work ===
+
+[user@work outgoing]$ sudo modprobe vhci-hcd
+
+[user@work outgoing]$ usbip list -r 10.137.1.1
+usbip: info: no exportable devices found on 10.137.1.1
+
+=== Test ===
+
+==== Attach ====
+
+[user@netvm outgoing]$ usbip list -l
+Local USB devices
+=================
+ - busid 4-4 (2001:3c05)
+         4-4:1.0 -> asix
+
+[user@netvm outgoing]$ sudo usbip bind -b 4-4
+bind device on busid 4-4: complete
+
+[user@work outgoing]$ usbip list -r 10.137.1.1
+Exportable USB devices
+======================
+ - 10.137.1.1
+        4-4: D-Link Corp. : DUB-E100 Fast Ethernet [asix] (2001:3c05)
+           : /sys/devices/pci-0/pci0000:00/0000:00:00.7/usb4/4-4
+           : Vendor Specific Class / Vendor Specific Subclass / unknown protocol (ff/ff/00)
+           :  0 - Vendor Specific Class / Vendor Specific Subclass / unknown protocol (ff/ff/00)
+
+[user@work outgoing]$ sudo dhclient eth1
+
+[user@work outgoing]$ ifconfig eth1
+eth1: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500
+        inet 192.168.4.104  netmask 255.255.255.0  broadcast 192.168.4.255
+        inet6 fe80::280:c8ff:fe3c:7644  prefixlen 64  scopeid 0x20<link>
+        ether 00:80:c8:3c:76:44  txqueuelen 1000  (Ethernet)
+        RX packets 2  bytes 656 (656.0 B)
+        RX errors 0  dropped 0  overruns 0  frame 0
+        TX packets 0  bytes 1128 (1.1 KiB)
+        TX errors 0  dropped 0 overruns 0  carrier 0  collisions 0
+
+[user@work outgoing]$ ping -c 3 8.8.8.8
+PING 8.8.8.8 (8.8.8.8) 56(84) bytes of data.
+From 192.168.4.104 icmp_seq=1 Destination Host Unreachable
+From 192.168.4.104 icmp_seq=2 Destination Host Unreachable
+From 192.168.4.104 icmp_seq=3 Destination Host Unreachable
+
+--- 8.8.8.8 ping statistics ---
+
+and ouch :(.
+
+==== client side - work domain kernel crash ====
+
+[  763.135183] =================================
+[  763.135194] [ INFO: inconsistent lock state ]
+[  763.135206] 3.4.18-1dbg20121118h.pvops.qubes.x86_64 #1 Tainted: G         C O
+[  763.135220] ---------------------------------
+[  763.135231] inconsistent {SOFTIRQ-ON-W} -> {IN-SOFTIRQ-W} usage.
+[  763.135247] ksoftirqd/3/18 [HC0[0]:SC1[1]:HE0:SE0] takes:
+[  763.135259]  (&(&vhci->lock)->rlock){+.?...}, at: [<ffffffffa0173922>] vhci_urb_enqueue+0x62/0x490 [vhci_hcd]
+[  763.135302] {SOFTIRQ-ON-W} state was registered at:
+[  763.135310]   [<ffffffff8109fdb0>] __lock_acquire+0x4b0/0x1b10
+[  763.135324]   [<ffffffff810a198d>] lock_acquire+0x9d/0x120
+[  763.135334]   [<ffffffff814ae861>] _raw_spin_lock+0x31/0x40
+[  763.135347]   [<ffffffffa0171037>] show_status+0x37/0x1f0 [vhci_hcd]
+[  763.135359]   [<ffffffff813190b0>] dev_attr_show+0x20/0x60
+[  763.135371]   [<ffffffff811cb304>] sysfs_read_file+0xb4/0x1d0
+[  763.135383]   [<ffffffff8115e399>] vfs_read+0xa9/0x180
+[  763.135393]   [<ffffffff8115e4ba>] sys_read+0x4a/0x90
+[  763.135402]   [<ffffffff814b7229>] system_call_fastpath+0x16/0x1b
+[  763.135414] irq event stamp: 83961
+[  763.135420] hardirqs last  enabled at (83960): [<ffffffff81152a00>] __kmalloc_track_caller+0x110/0x250
+[  763.135436] hardirqs last disabled at (83961): [<ffffffff814af17e>] _raw_spin_lock_irqsave+0x2e/0x70
+[  763.135450] softirqs last  enabled at (83944): [<ffffffff810533f5>] __do_softirq+0x145/0x200
+[  763.135465] softirqs last disabled at (83949): [<ffffffff81053577>] run_ksoftirqd+0xc7/0x170
+[  763.135478] 
+[  763.135479] other info that might help us debug this:
+[  763.135488]  Possible unsafe locking scenario:
+[  763.135489] 
+[  763.135498]        CPU0
+[  763.135502]        ----
+[  763.135507]   lock(&(&vhci->lock)->rlock);
+[  763.135515]   <Interrupt>
+[  763.135519]     lock(&(&vhci->lock)->rlock);
+[  763.135528] 
+[  763.135528]  *** DEADLOCK ***
+[  763.135529] 
+[  763.135539] 1 lock held by ksoftirqd/3/18:
+[  763.135545]  #0:  (&(&list->lock)->rlock#7){..-...}, at: [<ffffffffa02a2e43>] rx_submit+0xa3/0x350 [usbnet]
+[  763.135567] 
+[  763.135568] stack backtrace:
+[  763.135577] Pid: 18, comm: ksoftirqd/3 Tainted: G         C O 3.4.18-1dbg20121118h.pvops.qubes.x86_64 #1
+[  763.135589] Call Trace:
+[  763.135599]  [<ffffffff814a527d>] print_usage_bug+0x1f7/0x208
+[  763.135611]  [<ffffffff810213bf>] ? save_stack_trace+0x2f/0x50
+[  763.135621]  [<ffffffff8109ed20>] ? print_shortest_lock_dependencies+0x1c0/0x1c0
+[  763.135633]  [<ffffffff8109f8c2>] mark_lock+0x272/0x2b0
+[  763.135643]  [<ffffffff8109fd38>] __lock_acquire+0x438/0x1b10
+[  763.135654]  [<ffffffff810154af>] ? dump_trace+0x19f/0x2b0
+[  763.135664]  [<ffffffff810a198d>] lock_acquire+0x9d/0x120
+[  763.135675]  [<ffffffffa0173922>] ? vhci_urb_enqueue+0x62/0x490 [vhci_hcd]
+[  763.135689]  [<ffffffff814af19e>] _raw_spin_lock_irqsave+0x4e/0x70
+[  763.135701]  [<ffffffffa0173922>] ? vhci_urb_enqueue+0x62/0x490 [vhci_hcd]
+[  763.135717]  [<ffffffffa0173922>] vhci_urb_enqueue+0x62/0x490 [vhci_hcd]
+[  763.135737]  [<ffffffffa02632ec>] usb_hcd_submit_urb+0x9c/0x820 [usbcore]
+[  763.135749]  [<ffffffff810a19ab>] ? lock_acquire+0xbb/0x120
+[  763.135765]  [<ffffffffa0264865>] usb_submit_urb+0x1e5/0x510 [usbcore]
+[  763.135777]  [<ffffffffa02a2f01>] rx_submit+0x161/0x350 [usbnet]
+[  763.135788]  [<ffffffffa02a4371>] usbnet_bh+0x281/0x3a4 [usbnet]
+[  763.135798]  [<ffffffff81053963>] tasklet_action+0x83/0x110
+[  763.135808]  [<ffffffff81053381>] __do_softirq+0xd1/0x200
+[  763.135817]  [<ffffffff81053577>] run_ksoftirqd+0xc7/0x170
+[  763.135827]  [<ffffffff810534b0>] ? __do_softirq+0x200/0x200
+[  763.135836]  [<ffffffff810534b0>] ? __do_softirq+0x200/0x200
+[  763.135848]  [<ffffffff8106e613>] kthread+0x93/0xa0
+[  763.135857]  [<ffffffff814b8674>] kernel_thread_helper+0x4/0x10
+[  763.135868]  [<ffffffff814af3b0>] ? retint_restore_args+0x13/0x13
+[  763.135878]  [<ffffffff814b8670>] ? gs_change+0x13/0x13
+[  763.136203] ADDRCONF(NETDEV_UP): eth1: link is not ready
+[  763.143870] NET: Registered protocol family 17
+[  764.818285] ADDRCONF(NETDEV_CHANGE): eth1: link becomes ready
+[  765.621114] asix 1-1:1.0: eth1: link up, 100Mbps, full-duplex, lpa 0xCDE1
+[  774.860066] eth1: no IPv6 routers present
+
+==== server side -- netvm domain kernel crash ====
+
+See usbvm-crash-20121121.txt
+
