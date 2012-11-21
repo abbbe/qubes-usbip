@@ -6,7 +6,7 @@
 #global prever rc8
 
 Name:          staging-kmod-addons
-Version:       3.6.1
+Version:       3.4.18
 Release:       %{?prever:0.}1%{?prever:.%{prever}}%{?dist}
 Summary:       Documentation and shared parts for the kmod-staging packages
 
@@ -136,6 +136,9 @@ fi
 
 
 %changelog
+* Wed Nov 21 2012 Alexandre Bezroutchko <abb [AT] gremwell [DOT] com>
+- Alter for qubes, downgrade to 3.4.18
+
 * Thu Oct 11 2012 Thorsten Leemhuis <fedora [AT] leemhuis [DOT] info> - 3.6.1-1
 - Update to 3.6.1
 
